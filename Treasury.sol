@@ -43,15 +43,13 @@ contract Treasury is ContractGuard {
 
     // exclusions from total supply
     address[] public excludedFromTotalSupply = [
-        address(0x0000000000000000000000000000000000000000), //Null Address.
-        address(0x000000000000000000000000000000000000dEaD), //Null Address.
         address(0xB7e1E341b2CBCc7d1EdF4DC6E5e962aE5C621ca5), // MainGenesisRewardPool
         address(0x04b79c851ed1A36549C6151189c79EC0eaBca745) // MainRewardPool
     ];
 
     // core components
     address public main;
-    address public bond;
+    address public tbond;
     address public share;
 
     address public boardroom;
@@ -127,7 +125,7 @@ contract Treasury is ContractGuard {
     modifier checkOperator() {
         require(
             IBasisAsset(main).operator() == address(this) &&
-                IBasisAsset(bond).operator() == address(this) &&
+                IBasisAsset(tbond).operator() == address(this) &&
                 IBasisAsset(share).operator() == address(this) &&
                 Operator(boardroom).operator() == address(this),
             "Treasury: need more permission"
@@ -180,7 +178,7 @@ contract Treasury is ContractGuard {
         if (_mainPrice <= mainPriceOne) {
             uint256 _mainSupply = getMainCirculatingSupply();
             uint256 _bondMaxSupply = _mainSupply.mul(maxDebtRatioPercent).div(10000);
-            uint256 _bondSupply = IERC20(bond).totalSupply();
+            uint256 _bondSupply = IERC20(tbond).totalSupply();
             if (_bondMaxSupply > _bondSupply) {
                 uint256 _maxMintableBond = _bondMaxSupply.sub(_bondSupply);
                 uint256 _maxBurnableMain = _maxMintableBond.mul(_mainPrice).div(1e18);
@@ -239,14 +237,14 @@ contract Treasury is ContractGuard {
 
     function initialize(
         address _main,
-        address _bond,
+        address _tbond,
         address _share,
         address _mainOracle,
         address _boardroom,
         uint256 _startTime
     ) public notInitialized {
         main = _main;
-        bond = _bond;
+        tbond = _tbond;
         share = _share;
         mainOracle = _mainOracle;
         boardroom = _boardroom;
@@ -263,8 +261,8 @@ contract Treasury is ContractGuard {
 
         bondDepletionFloorPercent = 10000; // 100% of Bond supply for depletion floor
         seigniorageExpansionFloorPercent = 3500; // At least 35% of expansion reserved for boardroom
-        maxSupplyContractionPercent = 300; // Upto 3.0% supply for contraction (to burn MAIN and mint BOND)
-        maxDebtRatioPercent = 4000; // Upto 40% supply of BOND to purchase
+        maxSupplyContractionPercent = 300; // Upto 3.0% supply for contraction (to burn MAIN and mint TBOND)
+        maxDebtRatioPercent = 4000; // Upto 40% supply of TBOND to purchase
 
         premiumThreshold = 110;
         premiumPercent = 7000;
@@ -424,11 +422,11 @@ contract Treasury is ContractGuard {
 
         uint256 _bondAmount = _mainAmount.mul(_rate).div(1e18);
         uint256 mainSupply = getMainCirculatingSupply();
-        uint256 newBondSupply = IERC20(bond).totalSupply().add(_bondAmount);
+        uint256 newBondSupply = IERC20(tbond).totalSupply().add(_bondAmount);
         require(newBondSupply <= mainSupply.mul(maxDebtRatioPercent).div(10000), "over max debt ratio");
 
         IBasisAsset(main).burnFrom(msg.sender, _mainAmount);
-        IBasisAsset(bond).mint(msg.sender, _bondAmount);
+        IBasisAsset(tbond).mint(msg.sender, _bondAmount);
 
         epochSupplyContractionLeft = epochSupplyContractionLeft.sub(_mainAmount);
         _updateMainPrice();
@@ -454,7 +452,7 @@ contract Treasury is ContractGuard {
 
         seigniorageSaved = seigniorageSaved.sub(Math.min(seigniorageSaved, _mainAmount));
 
-        IBasisAsset(bond).burnFrom(msg.sender, _bondAmount);
+        IBasisAsset(tbond).burnFrom(msg.sender, _bondAmount);
         IERC20(main).safeTransfer(msg.sender, _mainAmount);
 
         _updateMainPrice();
@@ -462,9 +460,9 @@ contract Treasury is ContractGuard {
         emit RedeemedBonds(msg.sender, _mainAmount, _bondAmount);
     }
 
-    //Sends a defined amount of main to the boardroom and calls allocateseigniorage.
     function _sendToBoardroom(uint256 _amount) internal {
 
+        //Mint new main.
         IBasisAsset(main).mint(address(this), _amount);
 
         uint256 _daoFundSharedAmount = 0;
@@ -511,12 +509,12 @@ contract Treasury is ContractGuard {
         if (epoch < bootstrapEpochs) {
             _sendToBoardroom(mainSupply.mul(bootstrapSupplyExpansionPercent).div(10000));
         } else {
+            //allow expansion.
             if (previousEpochMainPrice > mainPriceCeiling) {
 
                 //Get the total amount of bonds in existence.
-                uint256 bondSupply = IERC20(bond).totalSupply();
+                uint256 bondSupply = IERC20(tbond).totalSupply();
 
-                //pervious_epoch_price - intended_price .... means it base 1e18
                 uint256 _percentage = previousEpochMainPrice.sub(mainPriceOne);
 
                 uint256 _savedForBond;
@@ -525,32 +523,29 @@ contract Treasury is ContractGuard {
                 //Maximum supply expansion. 
                 uint256 _mse = _calculateMaxSupplyExpansionPercent(mainSupply).mul(1e14);
 
-                //Bound the "percentage" variable which is the difference.
                 if (_percentage > _mse) {
                     _percentage = _mse;
                 }
 
-                //If enough main in the "Treasury" to pay the debt of the bonds mint at usual rate
                 if (seigniorageSaved >= bondSupply.mul(bondDepletionFloorPercent).div(10000)) {
                     _savedForBoardroom = mainSupply.mul(_percentage).div(1e18);
-                //If not enough main in the contract then mint more...
                 } else {
-                    //Total main to be minted through seigniorage.
                     uint256 _seigniorage = mainSupply.mul(_percentage).div(1e18);
 
                     _savedForBoardroom = _seigniorage.mul(seigniorageExpansionFloorPercent).div(10000);
 
-                    //Rest of seigniorage goes to bond.
                     _savedForBond = _seigniorage.sub(_savedForBoardroom);
                     if (mintingFactorForPayingDebt > 0) {
                         _savedForBond = _savedForBond.mul(mintingFactorForPayingDebt).div(10000);
                     }
                 }
 
+                //Send to boardroom.
                 if (_savedForBoardroom > 0) {
                     _sendToBoardroom(_savedForBoardroom);
                 }
 
+                //Add the bond amount to the treasury. - i.e. this contract.
                 if (_savedForBond > 0) {
                     seigniorageSaved = seigniorageSaved.add(_savedForBond);
                     IBasisAsset(main).mint(address(this), _savedForBond);
@@ -567,7 +562,7 @@ contract Treasury is ContractGuard {
     ) external onlyOperator {
         // do not allow to drain core tokens
         require(address(_token) != address(main), "main");
-        require(address(_token) != address(bond), "bond");
+        require(address(_token) != address(tbond), "bond");
         require(address(_token) != address(share), "share");
         _token.safeTransfer(_to, _amount);
     }
@@ -592,7 +587,7 @@ contract Treasury is ContractGuard {
         IBoardroom(boardroom).governanceRecoverUnsupported(_token, _amount, _to);
     }
 
-    function setExcludedFromTotalSupply(address[] calldata _excludedFromTotalSupply) public onlyOperator {
+    function setExcludedFromTotalSupply(address[] calldata _excludedFromTotalSupply) external onlyOperator {
         excludedFromTotalSupply = _excludedFromTotalSupply;
     }
 }
